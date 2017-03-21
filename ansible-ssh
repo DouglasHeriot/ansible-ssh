@@ -3,12 +3,15 @@
 # This script is an inventory-aware ssh wrapper that eliminates the need
 # to repeat information from the inventory in .ssh/config.
 
+from ansible.cli import CLI
+from ansible.inventory import Inventory
+from ansible.parsing.dataloader import DataLoader
+from ansible.vars import VariableManager
+
+import ConfigParser
 import os
 import sys
-from ansible.inventory import Inventory
-from ansible.parsing import DataLoader
-from ansible.vars import VariableManager
-from ansible.cli import CLI
+
 
 def main(argv):
     # We require at least one host pattern on the command line (but we
@@ -23,12 +26,16 @@ def main(argv):
     parser = CLI.base_parser(
         usage='%prog <host-pattern>',
         runtask_opts=True,
+        inventory_opts=True,
     )
     options, args = parser.parse_args()
     pattern = args[0]
 
     # Load the inventory and find hosts matching the specified pattern.
-    inventory = Inventory(loader=loader, variable_manager=variable_manager, host_list=options.inventory)
+    inventory = Inventory(
+        loader=loader,
+        variable_manager=variable_manager,
+        host_list=options.inventory)
     variable_manager.set_inventory(inventory)
     hosts = inventory.list_hosts(pattern)
 
@@ -39,24 +46,47 @@ def main(argv):
 
     # Build ssh arguments for this host
     host = hosts[0]
+
+    # append global vars
+    config = ConfigParser.ConfigParser(allow_no_value=True)
+    config.read(options.inventory)
+    if config.has_section('{0}:vars'.format(pattern)):
+        data = config.items('{0}:vars'.format(pattern))
+        for key, value in dict(data).items():
+            if key in host.vars:
+                continue
+            host.vars[key] = value
+
     ssh_args = ['ssh']
 
-    if ('ansible_ssh_private_key_file' in host.vars
-        and host.vars['ansible_ssh_private_key_file'] is not None):
-        ssh_args += ("-o", "IdentityFile=\"{0}\"".format(os.path.expanduser(host.vars['ansible_ssh_private_key_file'])))
+    if 'ansible_ssh_user' in host.vars:
+        host.vars['ansible_user'] = host.vars['ansible_ssh_user']
+        del host.vars['ansible_ssh_user']
 
-    if ('ansible_ssh_port' in host.vars
-        and host.vars['ansible_ssh_port'] is not None):
-        ssh_args += ("-o", "Port={0}".format(host.vars['ansible_ssh_port']))
+    if 'ansible_ssh_port' in host.vars:
+        host.vars['ansible_port'] = host.vars['ansible_ssh_port']
+        del host.vars['ansible_ssh_port']
 
-    if ('ansible_ssh_user' in host.vars
-        and host.vars['ansible_ssh_user'] is not None):
-        ssh_args += ("-o", "User={0}".format(host.vars['ansible_ssh_user']))
+    if host.vars.get('ansible_ssh_private_key_file', None) is not None:
+        private_key_file = host.vars['ansible_ssh_private_key_file']
+        private_key_path = os.path.expanduser(private_key_file)
+        ssh_args += ("-o", "IdentityFile=\"{0}\"".format(private_key_path))
 
-    ssh_args.append(host.ipv4_address)
+    if host.vars.get('ansible_port', None) is not None:
+        ssh_args += ("-o", "Port={0}".format(host.vars['ansible_port']))
+
+    if host.vars.get('ansible_user', None) is not None:
+        ssh_args += ("-o", "User={0}".format(host.vars['ansible_user']))
+
+    ssh_args.append(host.address)
+
+    ansible_ssh_executable = '/usr/bin/ssh'
+    if 'ansible_ssh_executable' in host.vars:
+        ansible_ssh_executable = host.vars['ansible_ssh_executable']
 
     # Launch ssh
-    os.execl('/usr/bin/ssh', *ssh_args)
+    os.execl(ansible_ssh_executable, *ssh_args)
 
-if __name__=='__main__':
+
+if __name__ == '__main__':
     main(sys.argv)
